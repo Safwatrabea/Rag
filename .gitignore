@@ -15,3 +15,6 @@ ENV/
 
 # OS files
 .DS_Store
+
+# Streamlit static
+static/

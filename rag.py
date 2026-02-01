@@ -31,7 +31,7 @@ class MarketExpert:
             collection_name=COLLECTION_NAME,
             embedding=self.embeddings,
         )
-        self.llm = ChatOpenAI(model="gpt-5-mini", temperature=1)
+        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
 
     def get_chain(self):
         retriever = self.vector_store.as_retriever(search_kwargs={"k": 5})

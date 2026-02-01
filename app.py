@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import yaml
+import urllib.parse
+import html
 from yaml.loader import SafeLoader
 import streamlit_authenticator as stauth
 from rag import MarketExpert
@@ -48,19 +50,47 @@ elif st.session_state['authentication_status']:
             files = os.listdir("data")
             if files:
                 for f in files:
-                    st.caption(f"📄 {f}")
+                    encoded_f = urllib.parse.quote(f)
+                    st.markdown(f'📄 <a href="/app/static/data/{encoded_f}" target="_blank" style="color: #6d6d6d; font-size: 0.85rem; text-decoration: none;">{html.escape(f)}</a>', unsafe_allow_html=True)
             else:
                 st.caption("No documents found in data/")
         
         if st.button("Clear Chat History"):
-            st.session_state.chat_history = []
+            st.session_state.messages = []
             st.rerun()
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
     st.title("🧠 Mashroo3k Brain")
     st.subheader("Mashroo3k Brain, Database and Knowledge Bank")
+
+    # Global CSS for source badges
+    st.markdown("""
+        <style>
+        .source-badge {
+            text-decoration: none; 
+            padding: 6px 14px; 
+            background-color: rgba(255, 75, 75, 0.08); 
+            color: #ff4b4b !important; 
+            border: 1px solid rgba(255, 75, 75, 0.15); 
+            border-radius: 20px; 
+            font-size: 0.85rem; 
+            font-weight: 500; 
+            display: inline-flex; 
+            align-items: center; 
+            gap: 8px;
+            margin: 4px;
+            transition: all 0.2s ease;
+        }
+        .source-badge:hover {
+            background-color: rgba(255, 75, 75, 0.15);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            border-color: rgba(255, 75, 75, 0.3);
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
     # Check for API Key
     if not os.getenv("OPENAI_API_KEY"):
@@ -80,19 +110,19 @@ elif st.session_state['authentication_status']:
         st.stop()
 
     # Chat Interface
-    for message in st.session_state.chat_history:
+    for message in st.session_state.messages:
         if isinstance(message, HumanMessage):
             with st.chat_message("user"):
                 st.markdown(message.content)
         else:
             with st.chat_message("assistant"):
-                st.markdown(message.content)
+                st.markdown(message.content, unsafe_allow_html=True)
 
     user_input = st.chat_input("Ask about Saudi market stats, reports, or feasibility studies...")
 
     if user_input:
         # Add user message to history
-        st.session_state.chat_history.append(HumanMessage(content=user_input))
+        st.session_state.messages.append(HumanMessage(content=user_input))
         with st.chat_message("user"):
             st.markdown(user_input)
 
@@ -100,23 +130,47 @@ elif st.session_state['authentication_status']:
         with st.chat_message("assistant"):
             with st.spinner("Analyzing market data..."):
                 try:
+                    # Pass history excluding the latest user message to avoid duplication in prompt
+                    history_for_chain = st.session_state.messages[:-1]
+                    
                     response = rag_chain.invoke({
                         "input": user_input,
-                        "chat_history": st.session_state.chat_history
+                        "chat_history": history_for_chain
                     })
                     answer = response["answer"]
                     st.markdown(answer)
                     
-                    # Check for sources
                     if "context" in response and response["context"]:
-                        with st.expander("View Sources"):
-                            for doc in response["context"]:
-                                source = doc.metadata.get("source", "Unknown")
-                                st.caption(f"📍 Source: {source}")
-                                # Clean up source path for display if needed
-                                st.text(doc.page_content[:200] + "...")
+                        unique_sources = set()
+                        for doc in response["context"]:
+                            source_path = doc.metadata.get("source", "Unknown")
+                            if source_path != "Unknown":
+                                unique_sources.add(os.path.basename(source_path))
+                        
+                        if unique_sources:
+                            st.markdown("---")
+                            st.markdown("### 📄 Source Verification")
+                            
+                            # Display sources as clickable badges
+                            sources_html = '<div style="display: flex; flex-wrap: wrap; margin-bottom: 15px;">'
+                            for filename in sorted(unique_sources):
+                                encoded_filename = urllib.parse.quote(filename)
+                                file_url = f"/app/static/data/{encoded_filename}"
+                                sources_html += f'<a href="{file_url}" target="_blank" class="source-badge">📄 Open Source: {html.escape(filename)}</a>'
+                            sources_html += '</div>'
+                            
+                            st.markdown(sources_html, unsafe_allow_html=True)
+                            
+                            # Append sources to the answer for persistence
+                            answer += "\n\n---\n### 📄 Source Verification\n" + sources_html
+
+                            with st.expander("View Source Snippets"):
+                                for doc in response["context"]:
+                                    source = os.path.basename(doc.metadata.get("source", "Unknown"))
+                                    st.caption(f"📍 Source: {source}")
+                                    st.text(doc.page_content[:300] + "...")
 
                     # Add assistant message to history
-                    st.session_state.chat_history.append(AIMessage(content=answer))
+                    st.session_state.messages.append(AIMessage(content=answer))
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
