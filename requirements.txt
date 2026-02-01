@@ -13,3 +13,5 @@ openpyxl
 pandas
 networkx
 unstructured
+streamlit-authenticator
+pyyaml

@@ -26,11 +26,11 @@ def ingest_documents():
     
     # Define loaders for different file types
     loaders = {
-        "pdf": DirectoryLoader(DATA_DIR, glob="**/*.pdf", loader_cls=PyPDFLoader),
-        "txt": DirectoryLoader(DATA_DIR, glob="**/*.txt", loader_cls=TextLoader),
-        "docx": DirectoryLoader(DATA_DIR, glob="**/*.docx", loader_cls=Docx2txtLoader),
-        "csv": DirectoryLoader(DATA_DIR, glob="**/*.csv", loader_cls=CSVLoader),
-        "xlsx": DirectoryLoader(DATA_DIR, glob="**/*.xlsx", loader_cls=UnstructuredExcelLoader),
+        "pdf": DirectoryLoader(DATA_DIR, glob="**/*.pdf", loader_cls=PyPDFLoader, recursive=True),
+        "txt": DirectoryLoader(DATA_DIR, glob="**/*.txt", loader_cls=TextLoader, recursive=True),
+        "docx": DirectoryLoader(DATA_DIR, glob="**/*.docx", loader_cls=Docx2txtLoader, recursive=True),
+        "csv": DirectoryLoader(DATA_DIR, glob="**/*.csv", loader_cls=CSVLoader, recursive=True),
+        "xlsx": DirectoryLoader(DATA_DIR, glob="**/*.xlsx", loader_cls=UnstructuredExcelLoader, recursive=True),
     }
 
     docs = []
