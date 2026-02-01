@@ -1,0 +1,17 @@
+# Data and DB
+data/
+qdrant_db/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store

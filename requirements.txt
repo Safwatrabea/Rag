@@ -1,0 +1,15 @@
+langchain
+langchain-openai
+langchain-community
+langchain-text-splitters
+qdrant-client
+langchain-qdrant
+streamlit
+pypdf
+python-dotenv
+watchdog
+docx2txt
+openpyxl
+pandas
+networkx
+unstructured
