@@ -24,3 +24,6 @@ You only need to know **3 Steps**:
 ---
 ### ⚠️ Important Note
 Before using the system for the very first time, make sure you have added your **OpenAI API Key** to the `.env` file (ask a developer if you haven't done this yet!).
+
+### 🐢 First Run Delay
+The **first time** you run the app (or Update Brain), it might take a few minutes to set up the system. Please be patient and check the black window for progress. Subsequent runs will be much faster!

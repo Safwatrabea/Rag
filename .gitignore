@@ -1,6 +1,7 @@
 # Data and DB
 data/
 qdrant_db/
+chat_history.db
 
 # Python
 __pycache__/

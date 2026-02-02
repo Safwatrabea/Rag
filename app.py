@@ -8,6 +8,13 @@ import streamlit_authenticator as stauth
 from rag import MarketExpert
 from langchain_core.messages import HumanMessage, AIMessage
 from dotenv import load_dotenv
+from database import (
+    generate_session_id, 
+    save_message, 
+    get_user_sessions, 
+    get_session_messages,
+    delete_session
+)
 
 # Load env variables
 load_dotenv()
@@ -38,29 +45,72 @@ elif st.session_state['authentication_status']:
     username = st.session_state['username']
     # --- Main Application (Only visible if logged in) ---
     
-    # Sidebar - User Info & Logout
+    # Initialize session state for chat
+    if "current_session_id" not in st.session_state:
+        st.session_state.current_session_id = generate_session_id()
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    
+    # Sidebar - User Info & Chat History
     with st.sidebar:
         st.write(f"Welcome, **{name}**")
         authenticator.logout('Logout', 'main')
-        st.divider() # Visual separation
+        st.divider()
         
-        st.header("📚 Knowledge Base")
-        st.write("Loaded Documents:")
-        if os.path.exists("data"):
-            files = os.listdir("data")
-            if files:
-                for f in files:
-                    encoded_f = urllib.parse.quote(f)
-                    st.markdown(f'📄 <a href="/app/static/data/{encoded_f}" target="_blank" style="color: #6d6d6d; font-size: 0.85rem; text-decoration: none;">{html.escape(f)}</a>', unsafe_allow_html=True)
-            else:
-                st.caption("No documents found in data/")
-        
-        if st.button("Clear Chat History"):
+        # --- New Chat Button (Primary Action) ---
+        if st.button("➕ New Chat", use_container_width=True, type="primary"):
+            st.session_state.current_session_id = generate_session_id()
             st.session_state.messages = []
             st.rerun()
-
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+        
+        st.divider()
+        
+        # --- Your History Section ---
+        st.subheader("🕒 Your History")
+        
+        # Fetch user's sessions (lightweight - only metadata)
+        user_sessions = get_user_sessions(username)
+        
+        if user_sessions:
+            for session in user_sessions:
+                session_id = session['session_id']
+                is_current = session_id == st.session_state.current_session_id
+                
+                # Create a container for each session
+                col1, col2 = st.columns([5, 1])
+                
+                with col1:
+                    # Display session as clickable button
+                    button_label = f"{'🔵 ' if is_current else ''}{session['title']}"
+                    if st.button(
+                        button_label, 
+                        key=f"session_{session_id}",
+                        use_container_width=True,
+                        disabled=is_current
+                    ):
+                        # Load this session
+                        st.session_state.current_session_id = session_id
+                        # Fetch messages for this session
+                        session_messages = get_session_messages(username, session_id)
+                        st.session_state.messages = []
+                        for msg in session_messages:
+                            if msg['role'] == 'user':
+                                st.session_state.messages.append(HumanMessage(content=msg['content']))
+                            else:
+                                st.session_state.messages.append(AIMessage(content=msg['content']))
+                        st.rerun()
+                
+                with col2:
+                    # Delete button (only for non-current sessions)
+                    if not is_current:
+                        if st.button("🗑️", key=f"del_{session_id}", help="Delete this chat"):
+                            delete_session(username, session_id)
+                            st.rerun()
+                
+                # Show date below the session
+                st.caption(f"   📅 {session['date']}")
+        else:
+            st.caption("No previous chats yet. Start a new conversation!")
 
     st.title("🧠 Mashroo3k Brain")
     st.subheader("Mashroo3k Brain, Database and Knowledge Bank")
@@ -104,7 +154,6 @@ elif st.session_state['authentication_status']:
 
     try:
         expert = get_expert()
-        rag_chain = expert.get_chain()
     except Exception as e:
         st.error(f"Error initializing Knowledge Bank: {e}")
         st.stop()
@@ -123,6 +172,9 @@ elif st.session_state['authentication_status']:
     if user_input:
         # Add user message to history
         st.session_state.messages.append(HumanMessage(content=user_input))
+        # Save user message to database
+        save_message(username, st.session_state.current_session_id, 'user', user_input)
+        
         with st.chat_message("user"):
             st.markdown(user_input)
 
@@ -133,16 +185,18 @@ elif st.session_state['authentication_status']:
                     # Pass history excluding the latest user message to avoid duplication in prompt
                     history_for_chain = st.session_state.messages[:-1]
                     
-                    response = rag_chain.invoke({
-                        "input": user_input,
-                        "chat_history": history_for_chain
-                    })
+                    # Use the new process_query method with Query Router
+                    response = expert.process_query(user_input, history_for_chain)
                     answer = response["answer"]
+                    context_docs = response.get("context", [])
+                    query_type = response.get("query_type", "KNOWLEDGE_SEARCH")
+                    
                     st.markdown(answer)
                     
-                    if "context" in response and response["context"]:
+                    # Only show sources if there are documents AND it was a knowledge search
+                    if query_type == "KNOWLEDGE_SEARCH" and context_docs:
                         unique_sources = set()
-                        for doc in response["context"]:
+                        for doc in context_docs:
                             source_path = doc.metadata.get("source", "Unknown")
                             if source_path != "Unknown":
                                 unique_sources.add(os.path.basename(source_path))
@@ -165,12 +219,15 @@ elif st.session_state['authentication_status']:
                             answer += "\n\n---\n### 📄 Source Verification\n" + sources_html
 
                             with st.expander("View Source Snippets"):
-                                for doc in response["context"]:
+                                for doc in context_docs:
                                     source = os.path.basename(doc.metadata.get("source", "Unknown"))
                                     st.caption(f"📍 Source: {source}")
                                     st.text(doc.page_content[:300] + "...")
 
                     # Add assistant message to history
                     st.session_state.messages.append(AIMessage(content=answer))
+                    # Save assistant message to database
+                    save_message(username, st.session_state.current_session_id, 'assistant', answer)
+                    
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
