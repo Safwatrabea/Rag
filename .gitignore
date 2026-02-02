@@ -21,3 +21,4 @@ ENV/
 static/
 .venv/
 .streamlit/
+flashrank_cache/

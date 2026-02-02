@@ -180,54 +180,57 @@ elif st.session_state['authentication_status']:
 
         # Generate response
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing market data..."):
-                try:
-                    # Pass history excluding the latest user message to avoid duplication in prompt
-                    history_for_chain = st.session_state.messages[:-1]
+            try:
+                # Pass history excluding the latest user message
+                history_for_chain = st.session_state.messages[:-1]
+                
+                # Use the STREAMING version for typewriter effect
+                response = expert.process_query_streaming(user_input, history_for_chain)
+                
+                # Get metadata immediately (before streaming)
+                context_docs = response.get("context", [])
+                query_type = response.get("query_type", "KNOWLEDGE_SEARCH")
+                answer_generator = response.get("answer_generator")
+                
+                # Stream the answer with typewriter effect
+                # st.write_stream returns the full text after streaming completes
+                full_answer = st.write_stream(answer_generator)
+                
+                # Only show sources if there are documents AND it was a knowledge search
+                if query_type == "KNOWLEDGE_SEARCH" and context_docs:
+                    unique_sources = set()
+                    for doc in context_docs:
+                        source_path = doc.metadata.get("source", "Unknown")
+                        if source_path != "Unknown" and source_path != "🌐 Web Search":
+                            unique_sources.add(os.path.basename(source_path))
                     
-                    # Use the new process_query method with Query Router
-                    response = expert.process_query(user_input, history_for_chain)
-                    answer = response["answer"]
-                    context_docs = response.get("context", [])
-                    query_type = response.get("query_type", "KNOWLEDGE_SEARCH")
-                    
-                    st.markdown(answer)
-                    
-                    # Only show sources if there are documents AND it was a knowledge search
-                    if query_type == "KNOWLEDGE_SEARCH" and context_docs:
-                        unique_sources = set()
-                        for doc in context_docs:
-                            source_path = doc.metadata.get("source", "Unknown")
-                            if source_path != "Unknown":
-                                unique_sources.add(os.path.basename(source_path))
+                    if unique_sources:
+                        st.markdown("---")
+                        st.markdown("### 📄 Source Verification")
                         
-                        if unique_sources:
-                            st.markdown("---")
-                            st.markdown("### 📄 Source Verification")
-                            
-                            # Display sources as clickable badges
-                            sources_html = '<div style="display: flex; flex-wrap: wrap; margin-bottom: 15px;">'
-                            for filename in sorted(unique_sources):
-                                encoded_filename = urllib.parse.quote(filename)
-                                file_url = f"/app/static/data/{encoded_filename}"
-                                sources_html += f'<a href="{file_url}" target="_blank" class="source-badge">📄 Open Source: {html.escape(filename)}</a>'
-                            sources_html += '</div>'
-                            
-                            st.markdown(sources_html, unsafe_allow_html=True)
-                            
-                            # Append sources to the answer for persistence
-                            answer += "\n\n---\n### 📄 Source Verification\n" + sources_html
+                        # Display sources as clickable badges
+                        sources_html = '<div style="display: flex; flex-wrap: wrap; margin-bottom: 15px;">'
+                        for filename in sorted(unique_sources):
+                            encoded_filename = urllib.parse.quote(filename)
+                            file_url = f"/app/static/data/{encoded_filename}"
+                            sources_html += f'<a href="{file_url}" target="_blank" class="source-badge">📄 Open Source: {html.escape(filename)}</a>'
+                        sources_html += '</div>'
+                        
+                        st.markdown(sources_html, unsafe_allow_html=True)
+                        
+                        # Append sources to the answer for persistence
+                        full_answer += "\n\n---\n### 📄 Source Verification\n" + sources_html
 
-                            with st.expander("View Source Snippets"):
-                                for doc in context_docs:
-                                    source = os.path.basename(doc.metadata.get("source", "Unknown"))
-                                    st.caption(f"📍 Source: {source}")
-                                    st.text(doc.page_content[:300] + "...")
+                        with st.expander("View Source Snippets"):
+                            for doc in context_docs:
+                                source = os.path.basename(doc.metadata.get("source", "Unknown"))
+                                st.caption(f"📍 Source: {source}")
+                                st.text(doc.page_content[:300] + "...")
 
-                    # Add assistant message to history
-                    st.session_state.messages.append(AIMessage(content=answer))
-                    # Save assistant message to database
-                    save_message(username, st.session_state.current_session_id, 'assistant', answer)
-                    
-                except Exception as e:
-                    st.error(f"An error occurred: {e}")
+                # Add assistant message to history
+                st.session_state.messages.append(AIMessage(content=full_answer))
+                # Save assistant message to database
+                save_message(username, st.session_state.current_session_id, 'assistant', full_answer)
+                
+            except Exception as e:
+                st.error(f"An error occurred: {e}")

@@ -8,3 +8,8 @@ qdrant-client
 pypdf
 python-dotenv
 tiktoken
+duckduckgo-search
+flashrank
+llama-parse
+llama-index-core
+nest-asyncio
