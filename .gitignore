@@ -2,6 +2,7 @@
 data/
 qdrant_db/
 chat_history.db
+ingestion_state.json
 
 # Python
 __pycache__/

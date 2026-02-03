@@ -12,6 +12,14 @@ from langchain_community.tools import DuckDuckGoSearchRun
 # from langchain_community.tools.tavily_search import TavilySearchResults
 from qdrant_client import QdrantClient
 
+# Groq for fast General Helper chat
+try:
+    from langchain_groq import ChatGroq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    print("⚠️ langchain-groq not installed. General Helper will use OpenAI.")
+
 # FlashRank for fast reranking
 try:
     from flashrank import Ranker, RerankRequest
@@ -217,8 +225,14 @@ Tone: Insightful, Professional, Advisory. Arabic language priority.
         # LLM for generation and translation (non-streaming for internal use)
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
         
-        # Streaming LLM for typewriter effect in UI
+        # Streaming LLM for typewriter effect in UI (chat)
         self.llm_streaming = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, streaming=True)
+        
+        # Low-temperature streaming LLM for Report Writer (high factual adherence)
+        self.llm_writer = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, streaming=True)
+        
+        # Initialize Groq LLM for General Helper (lightning fast!)
+        self._setup_groq_llm()
         
         # Initialize the Query Router (for chat vs search classification)
         self.router = QueryRouter(self.llm)
@@ -253,6 +267,74 @@ Tone: Insightful, Professional, Advisory. Arabic language priority.
                 self.reranker = None
         else:
             self.reranker = None
+
+    def _setup_groq_llm(self):
+        """
+        Setup Groq LLMs with dual-model strategy:
+        1. Llama 3.3 70B (Versatile) for RAG & Report Writer - Deep reasoning, stable
+        2. Allam 1 13B (Instruct) for General Chat - Saudi-native, fast, conversational
+        
+        Fallbacks:
+        - If Allam is unavailable, use llama-3.1-8b-instant for General Chat
+        - If Groq entirely unavailable, use OpenAI
+        """
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        
+        self.llm_groq = None       # General Helper (Allam or Llama 3.1)
+        self.llm_groq_rag = None   # RAG & Report Writer (Llama 3.3 70B)
+        
+        if GROQ_AVAILABLE and groq_api_key:
+            try:
+                # ===== 1. RAG & REPORT WRITER MODEL (Heavy Lifting) =====
+                # Use Llama 3.3 70B for deep reasoning and stable reports
+                try:
+                    self.llm_groq_rag = ChatGroq(
+                        api_key=groq_api_key,
+                        model_name="llama-3.3-70b-versatile",
+                        temperature=0.5,  # Balanced for reports
+                        max_tokens=8000,  # High context for detailed reports
+                        streaming=True,
+                    )
+                    print("✅ Groq RAG/Writer LLM initialized (Llama 3.3 70B - Deep Reasoning)")
+                except Exception as e:
+                    print(f"⚠️ Llama 3.3 70B initialization failed: {e}")
+                    print("   Will use OpenAI fallback for reports")
+                
+                # ===== 2. GENERAL CHAT MODEL (Saudi-Native Custom) =====
+                # Try custom Orpheus Arabic Saudi model first (User-specific on Groq)
+                try:
+                    print("🌙 Attempting to initialize Orpheus Arabic Saudi (Custom Saudi-native model)...")
+                    self.llm_groq = ChatGroq(
+                        api_key=groq_api_key,
+                        model_name="canopylabs/orpheus-arabic-saudi",  # Custom model ID
+                        temperature=0.7,  # More creative/conversational
+                        streaming=True,
+                    )
+                    print("✅ Groq General Chat LLM initialized (Orpheus Arabic Saudi - Custom)")
+                    
+                except Exception as e:
+                    # Fallback to Llama 3.1 8B if custom model not accessible
+                    print(f"⚠️ Custom Orpheus model initialization failed: {e}")
+                    print("🔄 Falling back to Llama 3.1 8B Instant for General Chat...")
+                    try:
+                        self.llm_groq = ChatGroq(
+                            api_key=groq_api_key,
+                            model_name="llama-3.1-8b-instant",
+                            temperature=0.7,
+                            streaming=True,
+                        )
+                        print("✅ Groq General Chat LLM initialized (Llama 3.1 8B Instant - Fallback)")
+                    except Exception as e2:
+                        print(f"⚠️ Llama 3.1 fallback also failed: {e2}")
+                        print("   Will use OpenAI GPT-4o-mini for General Chat")
+                
+            except Exception as e:
+                print(f"⚠️ Groq initialization failed: {e}. Using OpenAI fallback.")
+        else:
+            if not GROQ_AVAILABLE:
+                print("⚠️ langchain-groq not installed. Using OpenAI fallback.")
+            elif not groq_api_key:
+                print("⚠️ GROQ_API_KEY not set. Using OpenAI fallback.")
 
     def _setup_multi_query_retriever(self):
         """
@@ -738,6 +820,366 @@ Return ONLY the 3 alternative queries, one per line. No numbering, no explanatio
             "query_type": "KNOWLEDGE_SEARCH",
             "source_type": source_type
         }
+
+    # ========================================
+    # REPORT WRITER MODE
+    # ========================================
+    
+    WRITER_SYSTEM_PROMPT = """# الدور: مستشار دراسات جدوى متخصص
+
+أنت خبير في كتابة دراسات الجدوى والتقارير التفصيلية للسوق السعودي.
+مهمتك: كتابة تقرير شامل ومُفصّل وغني بالبيانات عن الموضوع المطلوب.
+
+---
+
+## ⚠️ قواعد صارمة (يجب الالتزام بها):
+
+### القاعدة 1: ممنوع التلخيص!
+- لا تختصر أي معلومة
+- إذا وجدت 10 نقاط في المصادر، اذكر الـ 10 نقاط كاملة
+- التوسع والتفصيل مطلوب، وليس الاختصار
+
+### القاعدة 2: البيانات أولاً!
+- استخرج واعرض كل رقم، نسبة مئوية، وقيمة مالية موجودة في المصادر
+- إذا وجدت جدولاً في المصادر، أعد إنشائه بالكامل في التقرير
+- الأرقام المحددة أهم من العبارات العامة
+- مثال: بدلاً من "تكلفة عالية" ← اكتب "تكلفة 2,500,000 ريال سعودي"
+
+### القاعدة 3: هيكل متداخل ومفصل!
+- استخدم الترقيم المتداخل: 1. ثم 1.1 ثم 1.1.1
+- كل قسم رئيسي يجب أن يحتوي على أقسام فرعية
+- أضف عمقاً للتحليل
+
+### القاعدة 4: الطول والتفصيل!
+- التقرير يجب أن يكون طويلاً ومفصلاً
+- إذا كانت نقطة ما تحتوي على تفاصيل في المصادر، اذكرها جميعاً
+- لا تكتفِ بذكر العناوين، بل اشرح كل عنوان بالتفصيل
+
+---
+
+## 📋 الهيكل المطلوب للتقرير:
+
+### 1. الملخص التنفيذي (Executive Summary)
+- نظرة عامة شاملة عن المشروع/الموضوع
+- أهم المؤشرات والأرقام الرئيسية
+- النتيجة النهائية والتوصية
+
+### 2. تحليل السوق (Market Analysis)
+2.1 حجم السوق والطلب
+2.2 المنافسين والحصص السوقية  
+2.3 الاتجاهات والتوقعات المستقبلية
+2.4 الفرص والتحديات
+
+### 3. التحليل المالي (Financial Analysis)
+3.1 التكاليف الرأسمالية (CAPEX)
+    - تفصيل كل بند
+3.2 التكاليف التشغيلية (OPEX)
+    - تفصيل شهري/سنوي
+3.3 الإيرادات المتوقعة
+    - السيناريوهات المختلفة
+3.4 مؤشرات الربحية
+    - ROI, IRR, فترة الاسترداد
+    - نقطة التعادل
+
+### 4. المتطلبات والموارد
+4.1 الموقع والمساحة
+4.2 المعدات والتجهيزات
+4.3 الموارد البشرية
+4.4 التراخيص والمتطلبات القانونية
+
+### 5. تحليل المخاطر (Risk Analysis)
+5.1 المخاطر التشغيلية
+5.2 المخاطر المالية
+5.3 المخاطر السوقية
+5.4 خطط التخفيف
+
+### 6. التوصيات والخطوات التالية
+6.1 التوصية النهائية
+6.2 خطة التنفيذ المقترحة
+6.3 عوامل النجاح الحرجة
+
+---
+
+## 📊 تنسيق البيانات:
+
+- استخدم الجداول لعرض البيانات المالية:
+| البند | القيمة | الملاحظات |
+|-------|--------|----------|
+
+- استخدم القوائم المرقمة للخطوات
+- استخدم النقاط للتفاصيل
+- اذكر المصدر لكل معلومة رئيسية: [المصدر: اسم الملف]
+
+---
+
+# المصادر المتاحة (استخرج منها كل التفاصيل):
+{context}
+
+# الموضوع المطلوب:
+{topic}
+
+---
+
+⚠️ تذكير: اكتب تقريراً مفصلاً وشاملاً. لا تختصر. كل رقم مهم. كل تفصيل مطلوب.
+"""
+
+    def suggest_files(self, topic: str, k: int = 5) -> List[str]:
+        """
+        Smart file suggestion based on topic.
+        Returns list of unique filenames most relevant to the topic.
+        
+        Args:
+            topic: The report topic to search for
+            k: Number of top documents to retrieve
+            
+        Returns:
+            List of unique filenames (not full paths)
+        """
+        try:
+            print(f"\n🔍 Finding relevant files for topic: {topic[:50]}...")
+            
+            # Quick similarity search (no reranking for speed)
+            docs = self.vector_store.similarity_search(topic, k=k * 2)  # Get more for variety
+            
+            # Extract unique filenames
+            unique_files = []
+            seen = set()
+            
+            for doc in docs:
+                source = doc.metadata.get("source", "")
+                if source and source != "🌐 Web Search":
+                    filename = os.path.basename(source)
+                    if filename not in seen:
+                        seen.add(filename)
+                        unique_files.append(filename)
+                        
+                        if len(unique_files) >= k:
+                            break
+            
+            print(f"📄 Found {len(unique_files)} relevant files: {unique_files}")
+            return unique_files
+            
+        except Exception as e:
+            print(f"❌ Error suggesting files: {e}")
+            return []
+
+    def get_all_indexed_files(self) -> List[str]:
+        """
+        Get all unique filenames indexed in the vector store.
+        Useful for populating the multiselect options.
+        """
+        try:
+            # Scroll through Qdrant to get all unique sources
+            unique_files = set()
+            offset = None
+            
+            while True:
+                results = self.client.scroll(
+                    collection_name=COLLECTION_NAME,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                
+                points, offset = results
+                if not points:
+                    break
+                
+                for point in points:
+                    if point.payload:
+                        source = point.payload.get("metadata", {}).get("source", "")
+                        if source and source != "🌐 Web Search":
+                            unique_files.add(os.path.basename(source))
+                
+                if offset is None:
+                    break
+            
+            return sorted(list(unique_files))
+            
+        except Exception as e:
+            print(f"❌ Error getting indexed files: {e}")
+            return []
+
+    def _search_with_file_filter(self, query: str, filenames: List[str], k: int = 15) -> List[Any]:
+        """
+        Search VectorStore with metadata filtering to only search within specific files.
+        
+        Args:
+            query: The search query
+            filenames: List of filenames to filter by
+            k: Number of documents to retrieve
+            
+        Returns:
+            List of Document objects
+        """
+        try:
+            if not filenames:
+                print("⚠️ No files specified for filtering, searching all documents")
+                return self.vector_store.similarity_search(query, k=k)
+            
+            print(f"🔍 Searching within files: {filenames}")
+            
+            # Search with much higher k and filter manually (need enough to filter by filename)
+            # Multiplier of 4 ensures we get enough matches even with file filtering
+            all_docs = self.vector_store.similarity_search(query, k=min(k * 4, 200))
+            
+            # Filter by filename
+            filtered_docs = []
+            for doc in all_docs:
+                source = doc.metadata.get("source", "")
+                filename = os.path.basename(source) if source else ""
+                
+                if filename in filenames:
+                    filtered_docs.append(doc)
+                    
+                    if len(filtered_docs) >= k:
+                        break
+            
+            print(f"📚 Found {len(filtered_docs)} chunks from selected files")
+            return filtered_docs
+            
+        except Exception as e:
+            print(f"❌ File-filtered search error: {e}")
+            return []
+
+    def generate_report_streaming(self, topic: str, selected_files: List[str]):
+        """
+        Generate a DETAILED, DATA-HEAVY report with streaming output.
+        Uses high-context retrieval (50 chunks) for maximum detail.
+        
+        Args:
+            topic: The report topic
+            selected_files: List of filenames to use as sources
+            
+        Yields:
+            String chunks of the report
+        """
+        try:
+            print(f"\n{'='*60}")
+            print(f"📝 Generating DETAILED Report: {topic[:50]}...")
+            print(f"📄 Using sources: {selected_files}")
+            print(f"{'='*60}")
+            
+            # Step 1: Retrieve HIGH-CONTEXT chunks (50 chunks for maximum detail)
+            docs = self._search_with_file_filter(topic, selected_files, k=50)
+            
+            if not docs:
+                yield "⚠️ لم أجد معلومات كافية في الملفات المحددة. يرجى اختيار ملفات أخرى."
+                return
+            
+            # Step 2: Format context with source attribution
+            context_parts = []
+            for i, doc in enumerate(docs, 1):
+                source = os.path.basename(doc.metadata.get("source", "Unknown"))
+                context_parts.append(f"[المصدر {i}: {source}]\n{doc.page_content}")
+            
+            context = "\n\n---\n\n".join(context_parts)
+            
+            print(f"📊 Context prepared: {len(docs)} chunks, {len(context)} chars")
+            
+            # Step 3: Build the prompt
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", self.WRITER_SYSTEM_PROMPT),
+                ("human", "اكتب تقريراً شاملاً عن الموضوع التالي: {topic}")
+            ])
+            
+            # Step 4: Stream the response
+            # PRIORITIZE Llama 3.3 70B (Groq) for reports if available (Superior Reasoning + Speed)
+            llm_to_use = self.llm_groq_rag if self.llm_groq_rag else self.llm_writer
+            model_name = "Llama 3.3 70B (Groq)" if self.llm_groq_rag else "GPT-4o-Mini"
+            
+            print(f"🧠 Generating report using: {model_name}")
+            
+            chain = prompt | llm_to_use
+            
+            # Stream the response
+            for chunk in chain.stream({
+                "context": context,
+                "topic": topic
+            }):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+                    
+        except Exception as e:
+            print(f"❌ Report generation error: {e}")
+            yield f"❌ حدث خطأ أثناء إنشاء التقرير: {str(e)}"
+
+    def generate_report(self, topic: str, selected_files: List[str]) -> str:
+        """
+        Non-streaming version of report generation.
+        Returns the complete report text.
+        """
+        chunks = []
+        for chunk in self.generate_report_streaming(topic, selected_files):
+            chunks.append(chunk)
+        return "".join(chunks)
+
+    # ========================================
+    # GENERAL HELPER (No RAG - Direct LLM)
+    # ========================================
+    
+    GENERAL_HELPER_PROMPT = """أنت مساعد ذكي متعدد المهام. يمكنك المساعدة في:
+- كتابة الإيميلات والرسائل الرسمية
+- الترجمة بين العربية والإنجليزية
+- كتابة المحتوى والنصوص
+- الإجابة على الأسئلة العامة
+- التلخيص والتحرير
+- العصف الذهني والأفكار
+
+قواعد:
+1. كن مهنياً ومساعداً
+2. اكتب بنفس لغة المستخدم (إذا كتب بالعربية، رد بالعربية)
+3. إذا لم تكن متأكداً من شيء، اسأل للتوضيح
+4. قدم إجابات واضحة ومنظمة
+"""
+
+    def general_chat_streaming(self, user_input: str, chat_history: list):
+        """
+        General purpose chat - NO RAG, direct LLM response.
+        Uses gpt-4o-mini for cost optimization.
+        
+        Args:
+            user_input: User's message
+            chat_history: Previous conversation messages
+            
+        Yields:
+            String chunks of the response
+        """
+        try:
+            # Build the prompt
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", self.GENERAL_HELPER_PROMPT),
+                MessagesPlaceholder(variable_name="chat_history", optional=True),
+                ("human", "{input}")
+            ])
+            
+            # Convert chat history
+            formatted_history = self._convert_chat_history(chat_history)
+            
+            # Use Groq LLM for lightning-fast responses (falls back to OpenAI if unavailable)
+            llm = self.llm_groq if self.llm_groq else self.llm_streaming
+            chain = prompt | llm
+            
+            for chunk in chain.stream({
+                "chat_history": formatted_history,
+                "input": user_input
+            }):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+                    
+        except Exception as e:
+            print(f"❌ General chat error: {e}")
+            yield f"عذراً، حدث خطأ: {str(e)}"
+
+    def general_chat(self, user_input: str, chat_history: list) -> str:
+        """
+        Non-streaming version of general chat.
+        """
+        chunks = []
+        for chunk in self.general_chat_streaming(user_input, chat_history):
+            chunks.append(chunk)
+        return "".join(chunks)
 
     # Legacy method for backwards compatibility
     def get_chain(self):

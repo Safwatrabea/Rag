@@ -32,9 +32,25 @@ def init_database():
                 session_id TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-                content TEXT NOT NULL
+                content TEXT NOT NULL,
+                chat_type TEXT DEFAULT 'rag' CHECK(chat_type IN ('rag', 'general'))
             )
         """)
+        
+        # Migration: Add chat_type column if it doesn't exist
+        try:
+            cursor.execute("SELECT chat_type FROM conversations LIMIT 1")
+        except sqlite3.OperationalError:
+            # Column doesn't exist, add it and set existing records to 'rag'
+            cursor.execute("""
+                ALTER TABLE conversations ADD COLUMN chat_type TEXT DEFAULT 'rag' CHECK(chat_type IN ('rag', 'general'))
+            """)
+            cursor.execute("""
+                UPDATE conversations SET chat_type = 'rag' WHERE chat_type IS NULL
+            """)
+            conn.commit()
+            print("✅ Database migrated: Added chat_type column and set existing chats to 'rag'")
+        
         # Create indexes for faster queries
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_user_session 
@@ -44,6 +60,10 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_user_timestamp 
             ON conversations(user_username, timestamp DESC)
         """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_chat_type
+            ON conversations(user_username, chat_type, timestamp DESC)
+        """)
         conn.commit()
 
 
@@ -52,7 +72,7 @@ def generate_session_id() -> str:
     return str(uuid.uuid4())
 
 
-def save_message(user_username: str, session_id: str, role: str, content: str) -> int:
+def save_message(user_username: str, session_id: str, role: str, content: str, chat_type: str = 'rag') -> int:
     """
     Save a single message to the database.
     
@@ -61,6 +81,7 @@ def save_message(user_username: str, session_id: str, role: str, content: str) -
         session_id: The unique session/chat ID
         role: Either 'user' or 'assistant'
         content: The message content
+        chat_type: Either 'rag' (Data Chat) or 'general' (General Assistant)
     
     Returns:
         The ID of the inserted message
@@ -68,35 +89,45 @@ def save_message(user_username: str, session_id: str, role: str, content: str) -
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO conversations (user_username, session_id, role, content)
-            VALUES (?, ?, ?, ?)
-        """, (user_username, session_id, role, content))
+            INSERT INTO conversations (user_username, session_id, role, content, chat_type)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_username, session_id, role, content, chat_type))
         conn.commit()
         return cursor.lastrowid
 
 
-def get_user_sessions(user_username: str) -> List[Dict]:
+def get_user_sessions(user_username: str, chat_type: str = None) -> List[Dict]:
     """
     Get all chat sessions for a user (lightweight - only session metadata).
     Returns sessions with their first message preview and timestamp.
     
     Args:
         user_username: The username of the logged-in user
+        chat_type: Optional filter - 'rag' or 'general'. If None, returns all.
     
     Returns:
         List of session dictionaries with id, title, and timestamp
     """
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # Build query with optional chat_type filter
+        if chat_type:
+            chat_type_condition = "AND chat_type = ?"
+            params = (user_username, chat_type, user_username, chat_type, user_username)
+        else:
+            chat_type_condition = ""
+            params = (user_username, user_username, user_username)
+        
         # Get unique sessions with their first message and latest timestamp
-        cursor.execute("""
+        cursor.execute(f"""
             WITH SessionInfo AS (
                 SELECT 
                     session_id,
                     MIN(timestamp) as first_timestamp,
                     MAX(timestamp) as last_timestamp
                 FROM conversations
-                WHERE user_username = ?
+                WHERE user_username = ? {chat_type_condition}
                 GROUP BY session_id
             ),
             FirstMessages AS (
@@ -105,7 +136,7 @@ def get_user_sessions(user_username: str) -> List[Dict]:
                     c.content as first_message
                 FROM conversations c
                 INNER JOIN SessionInfo si ON c.session_id = si.session_id
-                WHERE c.user_username = ?
+                WHERE c.user_username = ? {chat_type_condition}
                   AND c.role = 'user'
                   AND c.timestamp = (
                       SELECT MIN(timestamp) 
@@ -123,7 +154,7 @@ def get_user_sessions(user_username: str) -> List[Dict]:
             FROM SessionInfo si
             LEFT JOIN FirstMessages fm ON si.session_id = fm.session_id
             ORDER BY si.last_timestamp DESC
-        """, (user_username, user_username, user_username))
+        """, params)
         
         sessions = []
         for row in cursor.fetchall():

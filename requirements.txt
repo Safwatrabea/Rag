@@ -13,3 +13,4 @@ flashrank
 llama-parse
 llama-index-core
 nest-asyncio
+langchain-groq

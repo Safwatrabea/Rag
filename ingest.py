@@ -1,9 +1,10 @@
 import os
+import json
 import asyncio
 import hashlib
 import nest_asyncio
 from pathlib import Path
-from typing import List, Set
+from typing import List, Set, Dict
 from tqdm.asyncio import tqdm_asyncio
 from tqdm import tqdm
 from langchain_community.document_loaders import (
@@ -30,6 +31,7 @@ load_dotenv()
 DATA_DIR = "data"
 COLLECTION_NAME = "saudi_market_knowledge"
 QDRANT_PATH = "qdrant_db"
+STATE_FILE = "ingestion_state.json"  # Local state tracking
 
 # Concurrency settings
 MAX_CONCURRENT_PARSES = 5  # Process 5 files at a time (rate limit protection)
@@ -41,6 +43,59 @@ try:
 except ImportError:
     LLAMA_PARSE_AVAILABLE = False
     print("⚠️ LlamaParse not installed. Using fallback PyPDFLoader for PDFs.")
+
+
+def load_ingestion_state() -> Dict[str, float]:
+    """
+    Load the ingestion state from JSON file.
+    Returns a dictionary mapping filename -> last_modified_timestamp.
+    """
+    if not os.path.exists(STATE_FILE):
+        return {}
+    
+    try:
+        with open(STATE_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ Could not load state file: {e}")
+        return {}
+
+
+def save_ingestion_state(state: Dict[str, float]):
+    """
+    Save the ingestion state to JSON file.
+    """
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"⚠️ Could not save state file: {e}")
+
+
+def should_process_file(file_path: Path, state: Dict[str, float]) -> bool:
+    """
+    Check if a file should be processed based on modification time.
+    
+    Args:
+        file_path: Path to the file
+        state: Current ingestion state
+    
+    Returns:
+        True if file should be processed, False if it should be skipped
+    """
+    filename = str(file_path)
+    current_mtime = os.path.getmtime(file_path)
+    
+    # If file is not in state, it's new -> process it
+    if filename not in state:
+        return True
+    
+    # If file timestamp is newer than stored timestamp -> process it (updated)
+    if current_mtime > state[filename]:
+        return True
+    
+    # File hasn't changed -> skip it
+    return False
 
 
 def get_file_hash(file_path: Path) -> str:
@@ -127,13 +182,13 @@ async def parse_single_pdf_async(
             return []
 
 
-async def parse_pdfs_async(data_dir: str, skip_hashes: Set[str] = None) -> List[Document]:
+async def parse_pdfs_async(data_dir: str, ingestion_state: Dict[str, float] = None) -> List[Document]:
     """
     Parse all PDF files using LlamaParse ASYNCHRONOUSLY with concurrency control.
     
     Args:
         data_dir: Directory containing PDF files
-        skip_hashes: Set of file hashes to skip (already indexed)
+        ingestion_state: Dictionary mapping filename -> last_modified_timestamp
     
     Returns:
         List of LangChain Document objects
@@ -148,7 +203,7 @@ async def parse_pdfs_async(data_dir: str, skip_hashes: Set[str] = None) -> List[
         print("   Get your free API key at: https://cloud.llamaindex.ai/")
         return []
     
-    skip_hashes = skip_hashes or set()
+    ingestion_state = ingestion_state or {}
     
     # Initialize LlamaParse
     parser = LlamaParse(
@@ -166,19 +221,20 @@ async def parse_pdfs_async(data_dir: str, skip_hashes: Set[str] = None) -> List[
         print("⚠️ No PDF files found in data directory")
         return []
     
-    # Filter out already indexed files (Smart Skip)
+    # Filter out already indexed files (Smart Skip using JSON state)
     files_to_process = []
     skipped_count = 0
     
     for pdf_path in pdf_files:
-        file_hash = get_file_hash(pdf_path)
-        if file_hash in skip_hashes:
-            skipped_count += 1
-        else:
+        if should_process_file(pdf_path, ingestion_state):
+            file_hash = get_file_hash(pdf_path)
             files_to_process.append((pdf_path, file_hash))
+        else:
+            skipped_count += 1
+            print(f"⏭️  Skipping {pdf_path.name} - No changes detected")
     
     if skipped_count > 0:
-        print(f"⏭️ Skipping {skipped_count} already indexed files")
+        print(f"⏭️  Total skipped: {skipped_count} unchanged files")
     
     if not files_to_process:
         print("✅ All files already indexed. Nothing to process.")
@@ -207,31 +263,70 @@ async def parse_pdfs_async(data_dir: str, skip_hashes: Set[str] = None) -> List[
     for doc_list in results:
         all_docs.extend(doc_list)
     
+    # Update ingestion state for processed files
+    for pdf_path, _ in files_to_process:
+        ingestion_state[str(pdf_path)] = os.path.getmtime(pdf_path)
+    
     print(f"\n📚 Parsed {len(all_docs)} document pages from {len(files_to_process)} files")
     return all_docs
 
 
-def load_other_documents(data_dir: str) -> List[Document]:
+def load_other_documents(data_dir: str, ingestion_state: Dict[str, float] = None) -> List[Document]:
     """
-    Load non-PDF documents using standard loaders.
+    Load non-PDF documents using standard loaders with state tracking.
     """
-    loaders = {
-        "txt": DirectoryLoader(data_dir, glob="**/*.txt", loader_cls=TextLoader, recursive=True),
-        "docx": DirectoryLoader(data_dir, glob="**/*.docx", loader_cls=Docx2txtLoader, recursive=True),
-        "csv": DirectoryLoader(data_dir, glob="**/*.csv", loader_cls=CSVLoader, recursive=True),
-        "xlsx": DirectoryLoader(data_dir, glob="**/*.xlsx", loader_cls=UnstructuredExcelLoader, recursive=True),
+    ingestion_state = ingestion_state or {}
+    
+    loaders_config = {
+        "txt": ("**/*.txt", TextLoader),
+        "docx": ("**/*.docx", Docx2txtLoader),
+        "csv": ("**/*.csv", CSVLoader),
+        "xlsx": ("**/*.xlsx", UnstructuredExcelLoader),
     }
 
     docs = []
-    for file_type, loader in loaders.items():
+    
+    for file_type, (glob_pattern, loader_cls) in loaders_config.items():
         try:
-            loaded_docs = loader.load()
-            if loaded_docs:
-                docs.extend(loaded_docs)
-                print(f"📄 Loaded {len(loaded_docs)} {file_type} documents.")
+            # Find all files of this type
+            files = list(Path(data_dir).glob(glob_pattern))
+            
+            if not files:
+                continue
+            
+            # Filter files based on state
+            files_to_process = []
+            skipped_count = 0
+            
+            for file_path in files:
+                if should_process_file(file_path, ingestion_state):
+                    files_to_process.append(file_path)
+                else:
+                    skipped_count += 1
+                    print(f"⏭️  Skipping {file_path.name} - No changes detected")
+            
+            if skipped_count > 0:
+                print(f"⏭️  {file_type.upper()}: Skipped {skipped_count} unchanged files")
+            
+            # Load only files that need processing
+            for file_path in files_to_process:
+                try:
+                    loader = loader_cls(str(file_path))
+                    loaded_docs = loader.load()
+                    docs.extend(loaded_docs)
+                    
+                    # Update state for processed file
+                    ingestion_state[str(file_path)] = os.path.getmtime(file_path)
+                    
+                except Exception as e:
+                    print(f"⚠️ Error loading {file_path.name}: {e}")
+            
+            if files_to_process:
+                print(f"📄 Loaded {len(files_to_process)} {file_type.upper()} documents.")
+                
         except Exception as e:
             if "No such file" not in str(e):
-                print(f"⚠️ Error loading {file_type} files: {e}")
+                print(f"⚠️ Error processing {file_type} files: {e}")
     
     return docs
 
@@ -256,49 +351,43 @@ def fallback_load_pdfs(data_dir: str) -> List[Document]:
 
 async def ingest_documents_async():
     """
-    Async version of document ingestion for parallel PDF processing.
+    Async version of document ingestion with JSON-based incremental sync.
     """
     print(f"\n{'='*60}")
-    print(f"🚀 Starting Document Ingestion (Async Mode)")
+    print(f"🚀 Starting Document Ingestion (Incremental Sync Mode)")
     print(f"{'='*60}\n")
     print(f"📁 Source directory: {DATA_DIR}")
     
-    # Initialize Qdrant client first (for smart skip)
-    qdrant_mode = os.getenv("QDRANT_MODE", "local").lower()
-    qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
-
-    if qdrant_mode == "server":
-        print(f"\n🔗 Connecting to Qdrant Server at {qdrant_url}...")
-        client = QdrantClient(url=qdrant_url)
-    else:
-        print(f"\n📁 Using Local Qdrant at {QDRANT_PATH}...")
-        client = QdrantClient(path=QDRANT_PATH)
+    # Load ingestion state (JSON-based tracking)
+    print("🔍 Loading ingestion state...")
+    ingestion_state = load_ingestion_state()
     
-    # Get already indexed file hashes (Smart Skip)
-    print("🔍 Checking for already indexed files...")
-    indexed_hashes = get_indexed_file_hashes(client, COLLECTION_NAME)
-    if indexed_hashes:
-        print(f"📦 Found {len(indexed_hashes)} unique files already in index")
+    if ingestion_state:
+        print(f"📦 Found {len(ingestion_state)} files in state tracking")
+    else:
+        print("📦 No previous state found - first run or fresh start")
     
     # Step 1: Parse PDFs with LlamaParse (or fallback)
     llama_api_key = os.getenv("LLAMA_CLOUD_API_KEY")
     
     if LLAMA_PARSE_AVAILABLE and llama_api_key:
         print("\n🦙 Using LlamaParse for PDF processing (async, parallel)")
-        pdf_docs = await parse_pdfs_async(DATA_DIR, skip_hashes=indexed_hashes)
+        pdf_docs = await parse_pdfs_async(DATA_DIR, ingestion_state=ingestion_state)
     else:
         print("\n⚠️ LlamaParse unavailable. Using standard PDF loader.")
         pdf_docs = fallback_load_pdfs(DATA_DIR)
     
     # Step 2: Load other document types
     print("\n📂 Loading other document types (txt, docx, csv, xlsx)...")
-    other_docs = load_other_documents(DATA_DIR)
+    other_docs = load_other_documents(DATA_DIR, ingestion_state=ingestion_state)
     
     # Combine all documents
     all_docs = pdf_docs + other_docs
     
     if not all_docs:
         print("\n✅ No new documents to ingest.")
+        # Save state even if no new docs (in case files were deleted)
+        save_ingestion_state(ingestion_state)
         return
 
     print(f"\n📊 Total new documents to index: {len(all_docs)}")
@@ -318,7 +407,18 @@ async def ingest_documents_async():
     # Step 4: Initialize Embeddings
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     
-    # Step 5: Ensure collection exists
+    # Step 5: Initialize Qdrant client
+    qdrant_mode = os.getenv("QDRANT_MODE", "local").lower()
+    qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+
+    if qdrant_mode == "server":
+        print(f"\n🔗 Connecting to Qdrant Server at {qdrant_url}...")
+        client = QdrantClient(url=qdrant_url)
+    else:
+        print(f"\n📁 Using Local Qdrant at {QDRANT_PATH}...")
+        client = QdrantClient(path=QDRANT_PATH)
+    
+    # Step 6: Ensure collection exists
     if not client.collection_exists(COLLECTION_NAME):
         client.create_collection(
             collection_name=COLLECTION_NAME,
@@ -326,7 +426,7 @@ async def ingest_documents_async():
         )
         print(f"✨ Created collection: {COLLECTION_NAME}")
 
-    # Step 6: Index chunks with progress bar
+    # Step 7: Index chunks with progress bar
     print("\n⬆️ Indexing chunks into Qdrant...")
     vector_store = QdrantVectorStore(
         client=client,
@@ -340,12 +440,17 @@ async def ingest_documents_async():
         batch = splits[i:i + batch_size]
         vector_store.add_documents(batch)
     
+    # Step 8: Save updated state
+    print("\n💾 Saving ingestion state...")
+    save_ingestion_state(ingestion_state)
+    
     print(f"\n{'='*60}")
     print(f"✅ Ingestion Complete!")
     print(f"{'='*60}")
     print(f"   📄 Documents processed: {len(all_docs)}")
     print(f"   ✂️ Chunks indexed: {len(splits)}")
     print(f"   📦 Collection: {COLLECTION_NAME}")
+    print(f"   💾 State saved to: {STATE_FILE}")
     print(f"{'='*60}\n")
 
 
