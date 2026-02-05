@@ -300,21 +300,22 @@ Tone: Insightful, Professional, Advisory. Arabic language priority.
                     print(f"⚠️ Llama 3.3 70B initialization failed: {e}")
                     print("   Will use OpenAI fallback for reports")
                 
-                # ===== 2. GENERAL CHAT MODEL (Saudi-Native Custom) =====
-                # Try custom Orpheus Arabic Saudi model first (User-specific on Groq)
+                # ===== 2. GENERAL CHAT MODEL (GPT-OSS 120B) =====
+                # Use the powerful 120B parameter model on Groq
                 try:
-                    print("🌙 Attempting to initialize Orpheus Arabic Saudi (Custom Saudi-native model)...")
+                    print("🌙 Attempting to initialize GPT-OSS 120B (High-Intelligence)...")
                     self.llm_groq = ChatGroq(
                         api_key=groq_api_key,
-                        model_name="canopylabs/orpheus-arabic-saudi",  # Custom model ID
-                        temperature=0.7,  # More creative/conversational
+                        model_name="openai/gpt-oss-120b",  # New 120B model
+                        temperature=0.7,  # Balanced for creative chat
+                        max_tokens=4096,
                         streaming=True,
                     )
-                    print("✅ Groq General Chat LLM initialized (Orpheus Arabic Saudi - Custom)")
+                    print("✅ Groq General Chat LLM initialized (GPT-OSS 120B)")
                     
                 except Exception as e:
-                    # Fallback to Llama 3.1 8B if custom model not accessible
-                    print(f"⚠️ Custom Orpheus model initialization failed: {e}")
+                    # Fallback to Llama 3.1 8B if 120B is unavailable
+                    print(f"⚠️ GPT-OSS 120B initialization failed: {e}")
                     print("🔄 Falling back to Llama 3.1 8B Instant for General Chat...")
                     try:
                         self.llm_groq = ChatGroq(

@@ -61,6 +61,8 @@ elif st.session_state['authentication_status']:
         st.session_state.all_files = []
     if "report_content" not in st.session_state:
         st.session_state.report_content = ""
+    if "selected_sources" not in st.session_state:
+        st.session_state.selected_sources = []
     
     # Initialize session state for General Helper
     if "general_messages" not in st.session_state:
@@ -213,7 +215,7 @@ elif st.session_state['authentication_status']:
     # Initialize RAG System (Cached to avoid reloading on every rerun)
     # Version hash forces cache refresh when rag.py changes
     @st.cache_resource(hash_funcs={type: lambda _: None}, ttl=3600)
-    def get_expert(_cache_version="v6"):
+    def get_expert(_cache_version="v7"):
         return MarketExpert()
 
     try:
@@ -231,7 +233,7 @@ elif st.session_state['authentication_status']:
     # TAB 1: CHAT MODE
     # ========================================
     with tab_chat:
-        # Chat Interface
+        # Chat Interface - Display History
         for message in st.session_state.messages:
             if isinstance(message, HumanMessage):
                 with st.chat_message("user"):
@@ -240,32 +242,31 @@ elif st.session_state['authentication_status']:
                 with st.chat_message("assistant"):
                     st.markdown(message.content, unsafe_allow_html=True)
 
-        user_input = st.chat_input("Ask about Saudi market stats, reports, or feasibility studies...")
-
-        if user_input:
-            # Add user message to history
-            st.session_state.messages.append(HumanMessage(content=user_input))
-            # Save user message to database
-            save_message(username, st.session_state.current_session_id, 'user', user_input, chat_type='rag')
-            
+        # Standard Sticky Chat Input
+        if prompt := st.chat_input("Ask about Saudi market stats, reports, or feasibility studies..."):
+            # 1. Display user message immediately
             with st.chat_message("user"):
-                st.markdown(user_input)
+                st.markdown(prompt)
+            
+            # 2. Add to history & DB
+            st.session_state.messages.append(HumanMessage(content=prompt))
+            save_message(username, st.session_state.current_session_id, 'user', prompt, chat_type='rag')
 
-            # Generate response
+            # 3. Generate & Stream Response
             with st.chat_message("assistant"):
                 try:
                     # Pass history excluding the latest user message
                     history_for_chain = st.session_state.messages[:-1]
                     
                     # Use the STREAMING version for typewriter effect
-                    response = expert.process_query_streaming(user_input, history_for_chain)
+                    response = expert.process_query_streaming(prompt, history_for_chain)
                     
-                    # Get metadata immediately (before streaming)
+                    # Get metadata immediately
                     context_docs = response.get("context", [])
                     query_type = response.get("query_type", "KNOWLEDGE_SEARCH")
                     answer_generator = response.get("answer_generator")
                     
-                    # Stream the answer with typewriter effect
+                    # Stream the answer
                     full_answer = st.write_stream(answer_generator)
                     
                     # Only show sources if there are documents AND it was a knowledge search
@@ -299,10 +300,12 @@ elif st.session_state['authentication_status']:
                                     st.caption(f"📍 Source: {source}")
                                     st.text(doc.page_content[:300] + "...")
 
-                    # Add assistant message to history
+                    # 4. Add assistant message to history & DB
                     st.session_state.messages.append(AIMessage(content=full_answer))
-                    # Save assistant message to database
                     save_message(username, st.session_state.current_session_id, 'assistant', full_answer, chat_type='rag')
+                    
+                    # 5. Rerun to refresh UI and position input at bottom
+                    st.rerun()
                     
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
@@ -340,8 +343,14 @@ elif st.session_state['authentication_status']:
                 if not st.session_state.all_files:
                     st.session_state.all_files = expert.get_all_indexed_files()
                 
+                # THE FIX: Auto-populate the multiselect widget
+                # Filter to ensure only valid files are selected
+                valid_files = [f for f in suggested if f in st.session_state.all_files]
+                st.session_state.selected_sources = valid_files
+                
             if suggested:
                 st.success(f"✅ Found {len(suggested)} relevant files!")
+                st.rerun()  # Refresh UI to show selected files
             else:
                 st.warning("⚠️ No files found matching this topic. Try different keywords.")
         
@@ -355,11 +364,10 @@ elif st.session_state['authentication_status']:
             except:
                 st.session_state.all_files = []
         
-        # Multiselect with smart defaults
+        # Multiselect with smart defaults (controlled via session_state.selected_sources)
         selected_files = st.multiselect(
             "Choose files to use as sources:",
             options=st.session_state.all_files,
-            default=st.session_state.suggested_files,
             help="Click 'Find Files' to auto-suggest relevant files, or manually select.",
             key="selected_sources"
         )
@@ -424,7 +432,7 @@ elif st.session_state['authentication_status']:
     # TAB 3: GENERAL HELPER (ChatGPT-Style UX)
     # ========================================
     with tab_general:
-        # Display General Helper chat history (SEPARATE from Data Chat)
+        # Display General Helper chat history
         for message in st.session_state.general_messages:
             if isinstance(message, HumanMessage):
                 with st.chat_message("user"):
@@ -433,34 +441,35 @@ elif st.session_state['authentication_status']:
                 with st.chat_message("assistant"):
                     st.markdown(message.content)
         
-        # Chat input for General Helper (STICKY AT BOTTOM - ChatGPT style)
-        general_input = st.chat_input("Message General Assistant...", key="general_chat_input")
-        
-        if general_input:
-            # Add user message to General Helper history
-            st.session_state.general_messages.append(HumanMessage(content=general_input))
-            # Save user message to database with chat_type='general'
-            save_message(username, st.session_state.general_session_id, 'user', general_input, chat_type='general')
-            
+        # Standard Sticky Chat Input
+        if prompt := st.chat_input("Message General Assistant...", key="general_chat_input"):
+            # 1. Display user message immediately
             with st.chat_message("user"):
-                st.markdown(general_input)
+                st.markdown(prompt)
             
-            # Generate response (NO RAG - direct LLM)
+            # 2. Add to history & DB
+            st.session_state.general_messages.append(HumanMessage(content=prompt))
+            save_message(username, st.session_state.general_session_id, 'user', prompt, chat_type='general')
+            
+            # 3. Generate & Stream Response
             with st.chat_message("assistant"):
                 try:
                     # Use General Helper streaming (no RAG)
+                    # Pass history excluding the latest user message
                     response_generator = expert.general_chat_streaming(
-                        general_input, 
-                        st.session_state.general_messages[:-1]  # Exclude latest message
+                        prompt, 
+                        st.session_state.general_messages[:-1]
                     )
                     
                     # Stream the response
                     full_response = st.write_stream(response_generator)
                     
-                    # Add to history
+                    # 4. Add to history & DB
                     st.session_state.general_messages.append(AIMessage(content=full_response))
-                    # Save assistant message to database with chat_type='general'
                     save_message(username, st.session_state.general_session_id, 'assistant', full_response, chat_type='general')
+                    
+                    # 5. Rerun to refresh UI and position input at bottom
+                    st.rerun()
                     
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
